@@ -42,7 +42,7 @@ type DayName =
   | "Saturday"
   | "Sunday";
 
-type Equipment = "db" | "barbell" | "machine" | "cable" | "bodyweight";
+type Equipment = "db" | "barbell" | "ez_bar" | "machine" | "cable" | "bodyweight";
 
 type RepScheme = {
   workRangeMin: number;
@@ -351,6 +351,8 @@ function safeJsonParse<T>(s: string | null, fallback: T): T {
 }
 
 const PLATES: Plate[] = [45, 35, 25, 10, 5, 2.5];
+const EZ_BAR_WEIGHT = 20;
+const EZ_BAR_INCREMENT_TOTAL = 10;
 
 function emptyPlateCounts(): PlateCounts {
   return { 45: 0, 35: 0, 25: 0, 10: 0, 5: 0, 2.5: 0 };
@@ -393,57 +395,166 @@ function formatWeight(n: number): string {
   return Number.isInteger(n) ? `${n}` : `${n.toFixed(1)}`;
 }
 
+function getWorkingWeightDisplay(
+  ex: ExerciseSettings,
+  weight?: number,
+  barbellPlatesPerSide?: PlateCounts
+): { main: string; sub?: string } {
+  if (ex.equipment === "barbell") {
+    if (!barbellPlatesPerSide) return { main: "—" };
+    const total = platesPerSideToTotal(barbellPlatesPerSide, ex.barWeight);
+    return {
+      main: `${formatWeight(total)}`,
+      sub: `${plateCountsToText(barbellPlatesPerSide)} / side`,
+    };
+  }
+  if (ex.equipment === "db") {
+    if (weight == null) return { main: "—" };
+    return { main: `${formatWeight(weight)} / hand` };
+  }
+  if (ex.equipment === "ez_bar") {
+    if (weight == null) return { main: "—" };
+    return { main: `${formatWeight(weight + EZ_BAR_WEIGHT)}`, sub: `${formatWeight(weight)} plates` };
+  }
+  if (ex.equipment === "bodyweight") {
+    if (weight == null || weight === 0) return { main: "BW" };
+    return { main: `BW + ${formatWeight(weight)}` };
+  }
+  if (weight == null) return { main: "—" };
+  return { main: `${formatWeight(weight)}` };
+}
+
+function WorkingWeightBar({
+  exercise,
+  weight,
+  barbellPlatesPerSide,
+}: {
+  exercise: ExerciseSettings;
+  weight?: number;
+  barbellPlatesPerSide?: PlateCounts;
+}) {
+  const display = getWorkingWeightDisplay(exercise, weight, barbellPlatesPerSide);
+  return (
+    <div className="sticky top-3">
+      <div className="rounded-2xl border border-gray-200 bg-gray-50 px-2 py-3 text-center">
+        <div className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">
+          Working
+        </div>
+        <div className="text-base font-bold text-gray-900 leading-tight">{display.main}</div>
+        {display.sub ? (
+          <div className="text-[10px] text-gray-500 mt-1">{display.sub}</div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
 function setTotalWeight(ex: ExerciseSettings, s: SetEntry): number {
   if (ex.equipment === "barbell" && s.barbellPlatesPerSide) {
     return platesPerSideToTotal(s.barbellPlatesPerSide, ex.barWeight);
   }
+  if (ex.equipment === "ez_bar") return (s.weight ?? 0) + EZ_BAR_WEIGHT;
   if (ex.equipment === "db") return (s.weight ?? 0) * 2;
   return s.weight ?? 0;
 }
 
-function computeSuggestion(ex: ExerciseSettings, sets: SetEntry[]) {
-  const relevant = sets.filter((s) => s.exerciseId === ex.id);
+function computeSuggestion(ex: ExerciseSettings, sessions: Session[]) {
+  const HISTORY_SESSION_COUNT = 3; // Assumption: use the last 3 completed sessions for stable recommendations.
+  const completed = sessions
+    .filter((s) => (s.status ?? "active") === "completed")
+    .sort((a, b) => {
+      const aTime = a.endedAt ?? a.startedAt ?? Date.parse(a.dateISO);
+      const bTime = b.endedAt ?? b.startedAt ?? Date.parse(b.dateISO);
+      return bTime - aTime;
+    })
+    .slice(0, HISTORY_SESSION_COUNT);
+
+  const relevant = completed.flatMap((s) => s.sets.filter((set) => set.exerciseId === ex.id));
   if (relevant.length === 0) return null;
 
-  const scored = relevant
-    .map((s) => {
-      const totalReps = s.cleanReps + s.dirtyReps;
-      const dirtyRatio = totalReps === 0 ? 0 : s.dirtyReps / totalReps;
-      const effectiveReps = s.cleanReps + s.dirtyReps * ex.repScheme.dirtyPenalty;
-      const weightTotal = setTotalWeight(ex, s);
-      return { s, totalReps, dirtyRatio, effectiveReps, weightTotal };
-    })
-    .sort((a, b) => b.effectiveReps - a.effectiveReps);
+  const DROP_SET_MULTIPLIER = 0.5; // Assumption: drops count for half to keep them secondary to primary sets.
+  const isDrop = (s: SetEntry) => (s.kind ?? "normal") === "drop";
+  const primarySets = relevant.filter((s) => !isDrop(s));
+  const dropSets = relevant.filter(isDrop);
+  const primaryForCalc = primarySets.length > 0 ? primarySets : relevant; // Fallback if legacy data lacks primary sets.
+  const dropForCalc = primarySets.length > 0 ? dropSets : [];
+
+  const scoreSet = (s: SetEntry) => {
+    const totalReps = s.cleanReps + s.dirtyReps;
+    const dirtyRatio = totalReps === 0 ? 0 : s.dirtyReps / totalReps;
+    const effectiveReps = s.cleanReps + s.dirtyReps * ex.repScheme.dirtyPenalty;
+    const weightTotal = setTotalWeight(ex, s);
+    const effectiveVolume = effectiveReps * weightTotal;
+    return { s, totalReps, dirtyRatio, effectiveReps, weightTotal, effectiveVolume };
+  };
+
+  const scored = primaryForCalc
+    .map(scoreSet)
+    .sort((a, b) => b.effectiveVolume - a.effectiveVolume);
 
   const best = scored[0];
   const scheme = ex.repScheme;
 
+  const primaryTotals = primaryForCalc.reduce(
+    (acc, s) => {
+      const totalReps = s.cleanReps + s.dirtyReps;
+      return {
+        totalReps: acc.totalReps + totalReps,
+        dirtyReps: acc.dirtyReps + s.dirtyReps,
+        effectiveReps: acc.effectiveReps + s.cleanReps + s.dirtyReps * scheme.dirtyPenalty,
+      };
+    },
+    { totalReps: 0, dirtyReps: 0, effectiveReps: 0 }
+  );
+
+  const dropEffectiveReps = dropForCalc.reduce(
+    (sum, s) => sum + s.cleanReps + s.dirtyReps * scheme.dirtyPenalty,
+    0
+  );
+
+  // Assumption: "volume" is rep-equivalents to preserve rep-based thresholds.
+  const combinedEffectiveReps =
+    primaryTotals.effectiveReps + DROP_SET_MULTIPLIER * dropEffectiveReps;
+  const combinedEffectivePerPrimary =
+    primaryForCalc.length === 0 ? 0 : combinedEffectiveReps / primaryForCalc.length;
+  const primaryDirtyRatio =
+    primaryTotals.totalReps === 0 ? 0 : primaryTotals.dirtyReps / primaryTotals.totalReps;
+
   const canProgress =
-    best.s.cleanReps >= scheme.progressMinClean &&
-    best.dirtyRatio <= scheme.maxDirtyRatioToProgress;
+    combinedEffectivePerPrimary >= scheme.progressMinClean &&
+    primaryDirtyRatio <= scheme.maxDirtyRatioToProgress;
 
   let action: "increase" | "hold" | "decrease" = "hold";
   let message = "";
 
   if (canProgress) {
     action = "increase";
-    message = `Progress next time. You hit ${best.s.cleanReps} clean with low dirty reps.`;
-  } else if (best.s.cleanReps < scheme.workRangeMin) {
+    message = `Progress next time. Your combined effective reps (drops weighted) met the target.`;
+  } else if (combinedEffectivePerPrimary < scheme.workRangeMin) {
     action = "decrease";
     message = `Below working range (${scheme.workRangeMin}-${scheme.workRangeMax}). Consider dropping weight or reps.`;
-  } else if (best.dirtyRatio > scheme.maxDirtyRatioToProgress) {
+  } else if (primaryDirtyRatio > scheme.maxDirtyRatioToProgress) {
     action = "hold";
-    message = `Hold weight. Too many dirty reps (${Math.round(best.dirtyRatio * 100)}%). Convert dirty → clean first.`;
+    message = `Hold weight. Too many dirty reps (${Math.round(
+      primaryDirtyRatio * 100
+    )}%). Convert dirty → clean first.`;
   } else {
     action = "hold";
     message = `Hold weight. Aim to add clean reps toward ${scheme.progressMinClean}-${scheme.progressMaxClean} clean.`;
   }
+
+  const basisNote = `Based on last ${completed.length} completed ${
+    completed.length === 1 ? "session" : "sessions"
+  }.`;
+  message = `${message} ${basisNote}`;
 
   const inc =
     ex.equipment === "db"
       ? ex.dbIncrementPerHand * 2
       : ex.equipment === "barbell"
       ? ex.barbellIncrementPerSide * 2
+      : ex.equipment === "ez_bar"
+      ? EZ_BAR_INCREMENT_TOTAL
       : ex.otherIncrementTotal;
 
   const nextWeight =
@@ -755,6 +866,8 @@ function NumberInput({
   min = 0,
   inputMode = "decimal",
   center = false,
+  onEnter,
+  inputRef,
 }: {
   label: string;
   value: number;
@@ -762,6 +875,8 @@ function NumberInput({
   min?: number;
   inputMode?: React.HTMLAttributes<HTMLInputElement>["inputMode"];
   center?: boolean;
+  onEnter?: () => void;
+  inputRef?: React.Ref<HTMLInputElement>;
 }) {
   const [text, setText] = useState<string>(String(value));
 
@@ -799,11 +914,25 @@ function NumberInput({
           onChange(clamped);
           setText(String(clamped));
         }}
+        onKeyDown={(e) => {
+          if (e.key !== "Enter") return;
+          e.preventDefault();
+          if (!onEnter) return;
+          const trimmed = text.trim();
+          if (trimmed === "") return;
+          const n = Number(trimmed);
+          if (!Number.isFinite(n)) return;
+          const clamped = Math.max(min, n);
+          onChange(clamped);
+          setText(String(clamped));
+          onEnter();
+        }}
         className={
           "px-3 py-2 rounded-2xl border border-gray-200 focus:outline-none focus:ring-2 focus:ring-black w-full text-lg font-semibold " +
           (center ? "text-center" : "")
         }
         aria-label={label}
+        ref={inputRef}
       />
     </label>
   );
@@ -1999,6 +2128,7 @@ function WorkoutEditor({
             options={[
               { value: "db", label: "Dumbbell" },
               { value: "barbell", label: "Barbell" },
+              { value: "ez_bar", label: "EZ Bar" },
               { value: "cable", label: "Cable" },
               { value: "machine", label: "Machine" },
               { value: "bodyweight", label: "Bodyweight" },
@@ -2045,13 +2175,20 @@ function SessionView({
 }) {
   const workoutName = getWorkoutName(state, session.workoutId);
   const workoutExerciseIds = getWorkoutExerciseIds(state, session.workoutId);
+  const sessions = state.sessions;
   const [addModalOpen, setAddModalOpen] = useState(false);
   const [draft, setDraft] = useState<AddSetDraft | null>(null);
 
-  const [openExerciseId, setOpenExerciseId] = useState<string | null>(() => {
+  const [openDropdown, setOpenDropdown] = useState<{ type: "exercise"; id: string } | null>(() => {
     // default open: first exercise when active, otherwise none
-    return session.status === "active" ? (workoutExerciseIds[0] || null) : null;
+    return session.status === "active" && workoutExerciseIds[0]
+      ? { type: "exercise", id: workoutExerciseIds[0] }
+      : null;
   });
+  const openExerciseId = openDropdown?.type === "exercise" ? openDropdown.id : null;
+  const closeAllDropdowns = () => setOpenDropdown(null);
+  const setOpenExerciseId = (id: string | null) =>
+    setOpenDropdown(id ? { type: "exercise", id } : null);
 
   useEffect(() => {
     if (session.status !== "active") return;
@@ -2161,13 +2298,18 @@ function SessionView({
         </div>
       </Card>
 
-      <div className="space-y-2">
+      <div
+        className="space-y-2"
+        onClick={(e) => {
+          if (e.target === e.currentTarget) closeAllDropdowns();
+        }}
+      >
         {workoutExerciseIds.map((exerciseId) => {
           const ex = exercisesById.get(exerciseId);
           if (!ex) return null;
 
           const sets = setsForExercise(exerciseId);
-          const suggestion = computeSuggestion(ex, session.sets);
+          const suggestion = computeSuggestion(ex, sessions);
           const expanded = openExerciseId === exerciseId;
           const last = getLastSetForExercise(session, exerciseId);
 
@@ -2205,76 +2347,101 @@ function SessionView({
                 </div>
               </button>
 
-              {expanded ? (
-                <div className="px-4 pb-4">
-                  <div className="flex items-center justify-between gap-2">
-                    <button
-                      type="button"
-                      className="px-3 py-2 rounded-xl bg-gray-100 text-sm font-semibold"
-                      onClick={() => onOpenExercise(ex.id)}
-                    >
-                      Settings
-                    </button>
-                    <div className="flex gap-2">
-                      <button
-                        type="button"
-                        className="px-4 py-3 rounded-2xl bg-black text-white text-sm font-semibold"
-                        onClick={() => openAddFor(ex.id, "normal")}
-                        disabled={session.status !== "active"}
-                      >
-                        + Set
-                      </button>
-                      {sets.length > 0 ? (
-                        <button
-                          type="button"
-                          className="px-4 py-3 rounded-2xl bg-gray-100 text-sm font-semibold"
-                          onClick={() => openAddFor(ex.id, "drop", sets[sets.length - 1].id)}
-                          disabled={session.status !== "active"}
-                        >
-                          + Drop
-                        </button>
-                      ) : null}
-                    </div>
-                  </div>
-
-                  {suggestion ? (
-                    <div className="mt-3 rounded-2xl bg-gray-50 border border-gray-200 p-3">
-                      <div className="text-sm font-semibold">
-                        {suggestion.action === "increase"
-                          ? "↑ Progress"
-                          : suggestion.action === "decrease"
-                          ? "↓ Adjust"
-                          : "Hold"}
+              <div
+                className={
+                  "grid transition-[grid-template-rows] duration-300 ease-out " +
+                  (expanded ? "grid-rows-[1fr]" : "grid-rows-[0fr]")
+                }
+              >
+                <div
+                  className={
+                    "overflow-hidden transition-all duration-300 ease-out " +
+                    (expanded ? "opacity-100 translate-y-0" : "opacity-0 -translate-y-1")
+                  }
+                >
+                  <div className="px-4 pb-4">
+                    <div className="flex gap-3">
+                      <div className="w-16 shrink-0">
+                        <WorkingWeightBar
+                          exercise={ex}
+                          weight={last?.weight}
+                          barbellPlatesPerSide={last?.barbellPlatesPerSide}
+                        />
                       </div>
-                      <div className="text-sm text-gray-700 mt-1">{suggestion.message}</div>
-                      <div className="text-xs text-gray-600 mt-1">{suggestion.nextGoal}</div>
-                    </div>
-                  ) : (
-                    <div className="mt-3 text-sm text-gray-600">Log a set to get suggestions.</div>
-                  )}
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center justify-between gap-2">
+                          <button
+                            type="button"
+                            className="px-3 py-2 rounded-xl bg-gray-100 text-sm font-semibold"
+                            onClick={() => onOpenExercise(ex.id)}
+                          >
+                            Settings
+                          </button>
+                          <div className="flex gap-2">
+                            <button
+                              type="button"
+                              className="px-4 py-3 rounded-2xl bg-black text-white text-sm font-semibold"
+                              onClick={() => openAddFor(ex.id, "normal")}
+                              disabled={session.status !== "active"}
+                            >
+                              + Set
+                            </button>
+                            {sets.length > 0 ? (
+                              <button
+                                type="button"
+                                className="px-4 py-3 rounded-2xl bg-gray-100 text-sm font-semibold"
+                                onClick={() => openAddFor(ex.id, "drop", sets[sets.length - 1].id)}
+                                disabled={session.status !== "active"}
+                              >
+                                + Drop
+                              </button>
+                            ) : null}
+                          </div>
+                        </div>
 
-                  <div className="mt-3 space-y-2">
-                    {sets.length === 0 ? (
-                      <div className="text-sm text-gray-600">No sets yet.</div>
-                    ) : (
-                      sets
-                        .slice()
-                        .reverse()
-                        .map((s, idx) => (
-                          <SetRow
-                            key={s.id}
-                            index={sets.length - idx}
-                            exercise={ex}
-                            set={s}
-                            onDelete={() => onDeleteSet(session.id, s.id)}
-                            onUpdate={(patch) => onUpdateSet(session.id, s.id, patch)}
-                            disabled={session.status !== "active"}
-                          />
-                        ))
-                    )}
+                        {suggestion ? (
+                          <div className="mt-3 rounded-2xl bg-gray-50 border border-gray-200 p-3">
+                            <div className="text-sm font-semibold">
+                              {suggestion.action === "increase"
+                                ? "↑ Progress"
+                                : suggestion.action === "decrease"
+                                ? "↓ Adjust"
+                                : "Hold"}
+                            </div>
+                            <div className="text-sm text-gray-700 mt-1">{suggestion.message}</div>
+                            <div className="text-xs text-gray-600 mt-1">{suggestion.nextGoal}</div>
+                          </div>
+                        ) : (
+                          <div className="mt-3 text-sm text-gray-600">
+                            Log a set to get suggestions.
+                          </div>
+                        )}
+
+                        <div className="mt-3 space-y-2">
+                          {sets.length === 0 ? (
+                            <div className="text-sm text-gray-600">No sets yet.</div>
+                          ) : (
+                            sets
+                              .slice()
+                              .reverse()
+                              .map((s, idx) => (
+                                <SetRow
+                                  key={s.id}
+                                  index={sets.length - idx}
+                                  exercise={ex}
+                                  set={s}
+                                  onDelete={() => onDeleteSet(session.id, s.id)}
+                                  onUpdate={(patch) => onUpdateSet(session.id, s.id, patch)}
+                                  disabled={session.status !== "active"}
+                                />
+                              ))
+                          )}
+                        </div>
+                      </div>
+                    </div>
                   </div>
                 </div>
-              ) : null}
+              </div>
             </div>
           );
         })}
@@ -2315,6 +2482,10 @@ function SetRow({
       return `${formatWeight(total)} (${plateCountsToText(set.barbellPlatesPerSide)} / side)`;
     }
     if (exercise.equipment === "db") return `${formatWeight(set.weight ?? 0)} / hand`;
+    if (exercise.equipment === "ez_bar") {
+      const plates = set.weight ?? 0;
+      return `${formatWeight(plates + EZ_BAR_WEIGHT)} (plates ${formatWeight(plates)})`;
+    }
     if (exercise.equipment === "bodyweight")
       return set.weight ? `BW + ${formatWeight(set.weight)}` : "BW";
     return `${formatWeight(set.weight ?? 0)}`;
@@ -2372,82 +2543,111 @@ function AddSetForm({
   if (!exercise) return <div className="text-sm text-gray-700">Exercise not found.</div>;
 
   const isBarbell = exercise.equipment === "barbell";
+  const cleanRef = useRef<HTMLInputElement>(null);
+  const dirtyRef = useRef<HTMLInputElement>(null);
+  const addLockRef = useRef(false);
+  const addOnce = () => {
+    if (addLockRef.current) return;
+    addLockRef.current = true;
+    onAdd();
+  };
 
   return (
-    <div className="space-y-4">
-      <div className="text-sm text-gray-700">
-        <span className="font-semibold">{exercise.name}</span> <Pill>{draft.kind}</Pill>
+    <div className="flex gap-3">
+      <div className="w-16 shrink-0">
+        <WorkingWeightBar
+          exercise={exercise}
+          weight={draft.weight}
+          barbellPlatesPerSide={draft.barbellPlatesPerSide}
+        />
       </div>
-
-      {isBarbell ? (
-        <div className="space-y-2">
-          <div className="text-xs font-semibold text-gray-600">Plates per side</div>
-          <PlatesEditor
-            plates={draft.barbellPlatesPerSide || emptyPlateCounts()}
-            setPlates={(p) => onChange({ ...draft, barbellPlatesPerSide: p })}
-          />
-          <div className="text-sm text-gray-700">
-            Total:{" "}
-            {formatWeight(
-              platesPerSideToTotal(
-                draft.barbellPlatesPerSide || emptyPlateCounts(),
-                exercise.barWeight
-              )
-            )}
-          </div>
+      <div className="flex-1 min-w-0 space-y-4">
+        <div className="text-sm text-gray-700">
+          <span className="font-semibold">{exercise.name}</span> <Pill>{draft.kind}</Pill>
         </div>
-      ) : exercise.equipment === "db" ? (
-        <StepperInput
-          label="Weight per hand"
-          value={draft.weight ?? 0}
-          onChange={(n) => onChange({ ...draft, weight: n })}
-          step={exercise.dbIncrementPerHand}
-          min={0}
-        />
-      ) : exercise.equipment === "bodyweight" ? (
-        <NumberInput
-          label="Added weight (optional)"
-          value={draft.weight ?? 0}
-          onChange={(n) => onChange({ ...draft, weight: n })}
-          min={0}
-          center
-        />
-      ) : (
-        <StepperInput
-          label="Weight"
-          value={draft.weight ?? 0}
-          onChange={(n) => onChange({ ...draft, weight: n })}
-          step={exercise.otherIncrementTotal}
-          min={0}
-        />
-      )}
 
-      <div className="grid grid-cols-2 gap-3">
-        <NumberInput
-          label="Clean reps"
-          value={draft.cleanReps}
-          onChange={(n) => onChange({ ...draft, cleanReps: Math.max(0, Math.floor(n)) })}
-          min={0}
-          inputMode="numeric"
-          center
-        />
-        <NumberInput
-          label="Dirty reps"
-          value={draft.dirtyReps}
-          onChange={(n) => onChange({ ...draft, dirtyReps: Math.max(0, Math.floor(n)) })}
-          min={0}
-          inputMode="numeric"
-          center
-        />
+        {isBarbell ? (
+          <div className="space-y-2">
+            <div className="text-xs font-semibold text-gray-600">Plates per side</div>
+            <PlatesEditor
+              plates={draft.barbellPlatesPerSide || emptyPlateCounts()}
+              setPlates={(p) => onChange({ ...draft, barbellPlatesPerSide: p })}
+            />
+            <div className="text-sm text-gray-700">
+              Total:{" "}
+              {formatWeight(
+                platesPerSideToTotal(
+                  draft.barbellPlatesPerSide || emptyPlateCounts(),
+                  exercise.barWeight
+                )
+              )}
+            </div>
+          </div>
+        ) : exercise.equipment === "db" ? (
+          <StepperInput
+            label="Weight per hand"
+            value={draft.weight ?? 0}
+            onChange={(n) => onChange({ ...draft, weight: n })}
+            step={exercise.dbIncrementPerHand}
+            min={0}
+          />
+        ) : exercise.equipment === "ez_bar" ? (
+          <StepperInput
+            label="Plates"
+            value={draft.weight ?? 0}
+            onChange={(n) => onChange({ ...draft, weight: n })}
+            step={EZ_BAR_INCREMENT_TOTAL}
+            min={0}
+          />
+        ) : exercise.equipment === "bodyweight" ? (
+          <NumberInput
+            label="Added weight (optional)"
+            value={draft.weight ?? 0}
+            onChange={(n) => onChange({ ...draft, weight: n })}
+            min={0}
+            center
+          />
+        ) : (
+          <StepperInput
+            label="Weight"
+            value={draft.weight ?? 0}
+            onChange={(n) => onChange({ ...draft, weight: n })}
+            step={exercise.otherIncrementTotal}
+            min={0}
+          />
+        )}
+
+        <div className="grid grid-cols-2 gap-3">
+          <NumberInput
+            label="Clean reps"
+            value={draft.cleanReps}
+            onChange={(n) => onChange({ ...draft, cleanReps: Math.max(0, Math.floor(n)) })}
+            min={0}
+            inputMode="numeric"
+            center
+            inputRef={cleanRef}
+            onEnter={() => dirtyRef.current?.focus()}
+          />
+          <NumberInput
+            label="Dirty reps"
+            value={draft.dirtyReps}
+            onChange={(n) => onChange({ ...draft, dirtyReps: Math.max(0, Math.floor(n)) })}
+            min={0}
+            inputMode="numeric"
+            center
+            inputRef={dirtyRef}
+            onEnter={() => addOnce()}
+          />
+        </div>
+
+        <button
+          type="button"
+          className="w-full px-4 py-3 rounded-2xl bg-black text-white font-semibold active:scale-[0.97] transition-transform"
+          onClick={addOnce}
+        >
+          Add set
+        </button>
       </div>
-
-      <button
-        type="button"
-        className="w-full px-4 py-3 rounded-2xl bg-black text-white font-semibold active:scale-[0.97] transition-transform"
-        onClick={onAdd}
-      >
-        Add set
-      </button>
     </div>
   );
 }
@@ -2735,24 +2935,44 @@ function runTestsOnce() {
   );
 
   const sugg = computeSuggestion(exCable, [
-    { id: "s", exerciseId: "t_c", weight: 100, cleanReps: 10, dirtyReps: 0, createdAt: 0 },
+    {
+      id: "sess1",
+      workoutId: "w",
+      dateISO: "2025-01-01",
+      sets: [{ id: "s", exerciseId: "t_c", weight: 100, cleanReps: 10, dirtyReps: 0, createdAt: 0 }],
+      status: "completed",
+    },
   ]);
   assert(sugg && sugg.action === "increase", "Should recommend increase at 10 clean, 0 dirty");
 
   const sugg2 = computeSuggestion(exCable, [
-    { id: "s", exerciseId: "t_c", weight: 100, cleanReps: 10, dirtyReps: 5, createdAt: 0 },
+    {
+      id: "sess2",
+      workoutId: "w",
+      dateISO: "2025-01-02",
+      sets: [{ id: "s", exerciseId: "t_c", weight: 100, cleanReps: 10, dirtyReps: 5, createdAt: 0 }],
+      status: "completed",
+    },
   ]);
   assert(sugg2 && sugg2.action === "hold", "Should hold when dirty ratio is high");
 
   const exBb2 = mkEx("t_bb2", "Test BB2", "barbell");
   const sugg3 = computeSuggestion(exBb2, [
     {
-      id: "s",
-      exerciseId: "t_bb2",
-      barbellPlatesPerSide: plates,
-      cleanReps: 10,
-      dirtyReps: 0,
-      createdAt: 0,
+      id: "sess3",
+      workoutId: "w",
+      dateISO: "2025-01-03",
+      sets: [
+        {
+          id: "s",
+          exerciseId: "t_bb2",
+          barbellPlatesPerSide: plates,
+          cleanReps: 10,
+          dirtyReps: 0,
+          createdAt: 0,
+        },
+      ],
+      status: "completed",
     },
   ]);
   assert(sugg3 && sugg3.inc === 20, "Barbell increment should be 20 total by default");

@@ -1,11 +1,13 @@
 {
   "name": "LiftGraph",
   "short_name": "LiftGraph",
+  "description": "Minimal local-first workout tracker",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
-  "background_color": "#ffffff",
-  "theme_color": "#000000",
+  "background_color": "#0f172a",
+  "theme_color": "#0f172a",
+  "orientation": "portrait",
   "icons": [
     {
       "src": "/icon-192.png",
