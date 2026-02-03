@@ -42,7 +42,15 @@ type DayName =
   | "Saturday"
   | "Sunday";
 
-type Equipment = "db" | "barbell" | "ez_bar" | "machine" | "cable" | "bodyweight";
+type Equipment =
+  | "db"
+  | "barbell"
+  | "ez_bar_fixed"
+  | "ez_bar_plate"
+  | "ez_bar" // legacy
+  | "machine"
+  | "cable"
+  | "bodyweight";
 
 type RepScheme = {
   workRangeMin: number;
@@ -143,6 +151,7 @@ type PersistedState = {
 // ------------------------- Seed Data -------------------------
 
 function mkEx(id: string, name: string, equipment: Equipment): ExerciseSettings {
+  const isEzPlate = equipment === "ez_bar_plate";
   return {
     id,
     name,
@@ -156,9 +165,9 @@ function mkEx(id: string, name: string, equipment: Equipment): ExerciseSettings 
       maxDirtyRatioToProgress: 0.2,
     },
     dbIncrementPerHand: 5,
-    barbellIncrementPerSide: 10,
+    barbellIncrementPerSide: isEzPlate ? 5 : 10,
     otherIncrementTotal: 5,
-    barWeight: 45,
+    barWeight: isEzPlate ? EZ_BAR_WEIGHT : 45,
   };
 }
 
@@ -412,9 +421,14 @@ function getWorkingWeightDisplay(
     if (weight == null) return { main: "—" };
     return { main: `${formatWeight(weight)} / hand` };
   }
-  if (ex.equipment === "ez_bar") {
+  if (ex.equipment === "ez_bar_plate" || ex.equipment === "ez_bar") {
     if (weight == null) return { main: "—" };
-    return { main: `${formatWeight(weight + EZ_BAR_WEIGHT)}`, sub: `${formatWeight(weight)} plates` };
+    const barWeight = ex.equipment === "ez_bar" ? EZ_BAR_WEIGHT : ex.barWeight;
+    return { main: `${formatWeight(weight + barWeight)}`, sub: `${formatWeight(weight)} plates` };
+  }
+  if (ex.equipment === "ez_bar_fixed") {
+    if (weight == null) return { main: "—" };
+    return { main: `${formatWeight(weight)}` };
   }
   if (ex.equipment === "bodyweight") {
     if (weight == null || weight === 0) return { main: "BW" };
@@ -453,7 +467,10 @@ function setTotalWeight(ex: ExerciseSettings, s: SetEntry): number {
   if (ex.equipment === "barbell" && s.barbellPlatesPerSide) {
     return platesPerSideToTotal(s.barbellPlatesPerSide, ex.barWeight);
   }
+  if (ex.equipment === "ez_bar_plate")
+    return (s.weight ?? 0) + (ex.barWeight ?? EZ_BAR_WEIGHT);
   if (ex.equipment === "ez_bar") return (s.weight ?? 0) + EZ_BAR_WEIGHT;
+  if (ex.equipment === "ez_bar_fixed") return s.weight ?? 0;
   if (ex.equipment === "db") return (s.weight ?? 0) * 2;
   return s.weight ?? 0;
 }
@@ -553,6 +570,10 @@ function computeSuggestion(ex: ExerciseSettings, sessions: Session[]) {
       ? ex.dbIncrementPerHand * 2
       : ex.equipment === "barbell"
       ? ex.barbellIncrementPerSide * 2
+      : ex.equipment === "ez_bar_plate"
+      ? ex.barbellIncrementPerSide * 2
+      : ex.equipment === "ez_bar_fixed"
+      ? ex.otherIncrementTotal
       : ex.equipment === "ez_bar"
       ? EZ_BAR_INCREMENT_TOTAL
       : ex.otherIncrementTotal;
@@ -790,7 +811,7 @@ function Modal({
   return (
     <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center">
       <div className="absolute inset-0 bg-black/40" onClick={onClose} />
-      <div className="relative w-full sm:w-[520px] bg-white rounded-t-3xl sm:rounded-3xl p-4 shadow-xl">
+      <div className="relative w-[95vw] max-w-[520px] bg-white rounded-t-3xl sm:rounded-3xl p-4 shadow-xl">
         <div className="flex items-center justify-between">
           <div className="text-lg font-semibold">{title}</div>
           <button
@@ -2128,7 +2149,8 @@ function WorkoutEditor({
             options={[
               { value: "db", label: "Dumbbell" },
               { value: "barbell", label: "Barbell" },
-              { value: "ez_bar", label: "EZ Bar" },
+              { value: "ez_bar_fixed", label: "EZ Bar (Fixed)" },
+              { value: "ez_bar_plate", label: "EZ Bar (Plate Loaded)" },
               { value: "cable", label: "Cable" },
               { value: "machine", label: "Machine" },
               { value: "bodyweight", label: "Bodyweight" },
@@ -2320,6 +2342,11 @@ function SessionView({
             const repTxt = `${last.cleanReps}C + ${last.dirtyReps}D`;
             return `${wTxt} • ${repTxt}`;
           })();
+          const workingDisplay = getWorkingWeightDisplay(
+            ex,
+            last?.weight,
+            last?.barbellPlatesPerSide
+          );
 
           return (
             <div key={exerciseId} className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
@@ -2330,7 +2357,12 @@ function SessionView({
                 aria-expanded={expanded}
               >
                 <div className="min-w-0 text-left">
-                  <div className="font-semibold truncate">{ex.name}</div>
+                  <div className="flex items-center gap-2 min-w-0">
+                    <div className="font-semibold truncate">{ex.name}</div>
+                    <div className="shrink-0 text-[11px] px-2 py-1 rounded-full bg-gray-100 text-gray-700">
+                      Working {workingDisplay.main}
+                    </div>
+                  </div>
                   <div className="text-xs text-gray-600 mt-1">{summary}</div>
                 </div>
                 <div className="flex items-center gap-2">
@@ -2360,84 +2392,71 @@ function SessionView({
                   }
                 >
                   <div className="px-4 pb-4">
-                    <div className="flex gap-3">
-                      <div className="w-16 shrink-0">
-                        <WorkingWeightBar
-                          exercise={ex}
-                          weight={last?.weight}
-                          barbellPlatesPerSide={last?.barbellPlatesPerSide}
-                        />
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <button
+                        type="button"
+                        className="px-3 py-2 rounded-xl bg-gray-100 text-sm font-semibold"
+                        onClick={() => onOpenExercise(ex.id)}
+                      >
+                        Settings
+                      </button>
+                      <div className="flex gap-2">
+                        <button
+                          type="button"
+                          className="px-4 py-3 rounded-2xl bg-black text-white text-sm font-semibold"
+                          onClick={() => openAddFor(ex.id, "normal")}
+                          disabled={session.status !== "active"}
+                        >
+                          + Set
+                        </button>
+                        {sets.length > 0 ? (
                           <button
                             type="button"
-                            className="px-3 py-2 rounded-xl bg-gray-100 text-sm font-semibold"
-                            onClick={() => onOpenExercise(ex.id)}
+                            className="px-4 py-3 rounded-2xl bg-gray-100 text-sm font-semibold"
+                            onClick={() => openAddFor(ex.id, "drop", sets[sets.length - 1].id)}
+                            disabled={session.status !== "active"}
                           >
-                            Settings
+                            + Drop
                           </button>
-                          <div className="flex gap-2">
-                            <button
-                              type="button"
-                              className="px-4 py-3 rounded-2xl bg-black text-white text-sm font-semibold"
-                              onClick={() => openAddFor(ex.id, "normal")}
-                              disabled={session.status !== "active"}
-                            >
-                              + Set
-                            </button>
-                            {sets.length > 0 ? (
-                              <button
-                                type="button"
-                                className="px-4 py-3 rounded-2xl bg-gray-100 text-sm font-semibold"
-                                onClick={() => openAddFor(ex.id, "drop", sets[sets.length - 1].id)}
-                                disabled={session.status !== "active"}
-                              >
-                                + Drop
-                              </button>
-                            ) : null}
-                          </div>
-                        </div>
-
-                        {suggestion ? (
-                          <div className="mt-3 rounded-2xl bg-gray-50 border border-gray-200 p-3">
-                            <div className="text-sm font-semibold">
-                              {suggestion.action === "increase"
-                                ? "↑ Progress"
-                                : suggestion.action === "decrease"
-                                ? "↓ Adjust"
-                                : "Hold"}
-                            </div>
-                            <div className="text-sm text-gray-700 mt-1">{suggestion.message}</div>
-                            <div className="text-xs text-gray-600 mt-1">{suggestion.nextGoal}</div>
-                          </div>
-                        ) : (
-                          <div className="mt-3 text-sm text-gray-600">
-                            Log a set to get suggestions.
-                          </div>
-                        )}
-
-                        <div className="mt-3 space-y-2">
-                          {sets.length === 0 ? (
-                            <div className="text-sm text-gray-600">No sets yet.</div>
-                          ) : (
-                            sets
-                              .slice()
-                              .reverse()
-                              .map((s, idx) => (
-                                <SetRow
-                                  key={s.id}
-                                  index={sets.length - idx}
-                                  exercise={ex}
-                                  set={s}
-                                  onDelete={() => onDeleteSet(session.id, s.id)}
-                                  onUpdate={(patch) => onUpdateSet(session.id, s.id, patch)}
-                                  disabled={session.status !== "active"}
-                                />
-                              ))
-                          )}
-                        </div>
+                        ) : null}
                       </div>
+                    </div>
+
+                    {suggestion ? (
+                      <div className="mt-3 rounded-2xl bg-gray-50 border border-gray-200 p-3">
+                        <div className="text-sm font-semibold">
+                          {suggestion.action === "increase"
+                            ? "↑ Progress"
+                            : suggestion.action === "decrease"
+                            ? "↓ Adjust"
+                            : "Hold"}
+                        </div>
+                        <div className="text-sm text-gray-700 mt-1">{suggestion.message}</div>
+                        <div className="text-xs text-gray-600 mt-1">{suggestion.nextGoal}</div>
+                      </div>
+                    ) : (
+                      <div className="mt-3 text-sm text-gray-600">Log a set to get suggestions.</div>
+                    )}
+
+                    <div className="mt-3 space-y-2">
+                      {sets.length === 0 ? (
+                        <div className="text-sm text-gray-600">No sets yet.</div>
+                      ) : (
+                        sets
+                          .slice()
+                          .reverse()
+                          .map((s, idx) => (
+                            <SetRow
+                              key={s.id}
+                              index={sets.length - idx}
+                              exercise={ex}
+                              set={s}
+                              onDelete={() => onDeleteSet(session.id, s.id)}
+                              onUpdate={(patch) => onUpdateSet(session.id, s.id, patch)}
+                              disabled={session.status !== "active"}
+                            />
+                          ))
+                      )}
                     </div>
                   </div>
                 </div>
@@ -2482,9 +2501,17 @@ function SetRow({
       return `${formatWeight(total)} (${plateCountsToText(set.barbellPlatesPerSide)} / side)`;
     }
     if (exercise.equipment === "db") return `${formatWeight(set.weight ?? 0)} / hand`;
+    if (exercise.equipment === "ez_bar_plate") {
+      const plates = set.weight ?? 0;
+      const total = plates + exercise.barWeight;
+      return `${formatWeight(total)} (plates ${formatWeight(plates)})`;
+    }
     if (exercise.equipment === "ez_bar") {
       const plates = set.weight ?? 0;
       return `${formatWeight(plates + EZ_BAR_WEIGHT)} (plates ${formatWeight(plates)})`;
+    }
+    if (exercise.equipment === "ez_bar_fixed") {
+      return `${formatWeight(set.weight ?? 0)}`;
     }
     if (exercise.equipment === "bodyweight")
       return set.weight ? `BW + ${formatWeight(set.weight)}` : "BW";
@@ -2492,7 +2519,7 @@ function SetRow({
   };
 
   return (
-    <div className="rounded-2xl bg-gray-50 border border-gray-200 p-3">
+    <div className="w-[90%] mx-auto rounded-2xl bg-gray-50 border border-gray-200 p-3">
       <div className="flex items-center justify-between gap-2">
         <div className="text-sm font-semibold">
           Set {index} {set.kind === "drop" ? <Pill>Drop</Pill> : null}
@@ -2506,7 +2533,7 @@ function SetRow({
           Delete
         </button>
       </div>
-      <div className="mt-2 text-sm text-gray-800">{weightText()}</div>
+      <div className="mt-1 text-sm text-gray-800">{weightText()}</div>
       <div className="mt-2 grid grid-cols-2 gap-2">
         <NumberInput
           label="Clean reps"
@@ -2553,101 +2580,100 @@ function AddSetForm({
   };
 
   return (
-    <div className="flex gap-3">
-      <div className="w-16 shrink-0">
-        <WorkingWeightBar
-          exercise={exercise}
-          weight={draft.weight}
-          barbellPlatesPerSide={draft.barbellPlatesPerSide}
+    <div className="space-y-4">
+      <div className="text-sm text-gray-700">
+        <span className="font-semibold">{exercise.name}</span> <Pill>{draft.kind}</Pill>
+      </div>
+
+      {isBarbell ? (
+        <div className="space-y-2">
+          <div className="text-xs font-semibold text-gray-600">Plates per side</div>
+          <PlatesEditor
+            plates={draft.barbellPlatesPerSide || emptyPlateCounts()}
+            setPlates={(p) => onChange({ ...draft, barbellPlatesPerSide: p })}
+          />
+          <div className="text-sm text-gray-700">
+            Total:{" "}
+            {formatWeight(
+              platesPerSideToTotal(
+                draft.barbellPlatesPerSide || emptyPlateCounts(),
+                exercise.barWeight
+              )
+            )}
+          </div>
+        </div>
+      ) : exercise.equipment === "db" ? (
+        <StepperInput
+          label="Weight per hand"
+          value={draft.weight ?? 0}
+          onChange={(n) => onChange({ ...draft, weight: n })}
+          step={exercise.dbIncrementPerHand}
+          min={0}
+        />
+      ) : exercise.equipment === "ez_bar_plate" || exercise.equipment === "ez_bar" ? (
+        <StepperInput
+          label="Plates"
+          value={draft.weight ?? 0}
+          onChange={(n) => onChange({ ...draft, weight: n })}
+          step={exercise.barbellIncrementPerSide * 2}
+          min={0}
+        />
+      ) : exercise.equipment === "ez_bar_fixed" ? (
+        <StepperInput
+          label="Weight"
+          value={draft.weight ?? 0}
+          onChange={(n) => onChange({ ...draft, weight: n })}
+          step={exercise.otherIncrementTotal}
+          min={0}
+        />
+      ) : exercise.equipment === "bodyweight" ? (
+        <NumberInput
+          label="Added weight (optional)"
+          value={draft.weight ?? 0}
+          onChange={(n) => onChange({ ...draft, weight: n })}
+          min={0}
+          center
+        />
+      ) : (
+        <StepperInput
+          label="Weight"
+          value={draft.weight ?? 0}
+          onChange={(n) => onChange({ ...draft, weight: n })}
+          step={exercise.otherIncrementTotal}
+          min={0}
+        />
+      )}
+
+      <div className="grid grid-cols-2 gap-3">
+        <NumberInput
+          label="Clean reps"
+          value={draft.cleanReps}
+          onChange={(n) => onChange({ ...draft, cleanReps: Math.max(0, Math.floor(n)) })}
+          min={0}
+          inputMode="numeric"
+          center
+          inputRef={cleanRef}
+          onEnter={() => dirtyRef.current?.focus()}
+        />
+        <NumberInput
+          label="Dirty reps"
+          value={draft.dirtyReps}
+          onChange={(n) => onChange({ ...draft, dirtyReps: Math.max(0, Math.floor(n)) })}
+          min={0}
+          inputMode="numeric"
+          center
+          inputRef={dirtyRef}
+          onEnter={() => addOnce()}
         />
       </div>
-      <div className="flex-1 min-w-0 space-y-4">
-        <div className="text-sm text-gray-700">
-          <span className="font-semibold">{exercise.name}</span> <Pill>{draft.kind}</Pill>
-        </div>
 
-        {isBarbell ? (
-          <div className="space-y-2">
-            <div className="text-xs font-semibold text-gray-600">Plates per side</div>
-            <PlatesEditor
-              plates={draft.barbellPlatesPerSide || emptyPlateCounts()}
-              setPlates={(p) => onChange({ ...draft, barbellPlatesPerSide: p })}
-            />
-            <div className="text-sm text-gray-700">
-              Total:{" "}
-              {formatWeight(
-                platesPerSideToTotal(
-                  draft.barbellPlatesPerSide || emptyPlateCounts(),
-                  exercise.barWeight
-                )
-              )}
-            </div>
-          </div>
-        ) : exercise.equipment === "db" ? (
-          <StepperInput
-            label="Weight per hand"
-            value={draft.weight ?? 0}
-            onChange={(n) => onChange({ ...draft, weight: n })}
-            step={exercise.dbIncrementPerHand}
-            min={0}
-          />
-        ) : exercise.equipment === "ez_bar" ? (
-          <StepperInput
-            label="Plates"
-            value={draft.weight ?? 0}
-            onChange={(n) => onChange({ ...draft, weight: n })}
-            step={EZ_BAR_INCREMENT_TOTAL}
-            min={0}
-          />
-        ) : exercise.equipment === "bodyweight" ? (
-          <NumberInput
-            label="Added weight (optional)"
-            value={draft.weight ?? 0}
-            onChange={(n) => onChange({ ...draft, weight: n })}
-            min={0}
-            center
-          />
-        ) : (
-          <StepperInput
-            label="Weight"
-            value={draft.weight ?? 0}
-            onChange={(n) => onChange({ ...draft, weight: n })}
-            step={exercise.otherIncrementTotal}
-            min={0}
-          />
-        )}
-
-        <div className="grid grid-cols-2 gap-3">
-          <NumberInput
-            label="Clean reps"
-            value={draft.cleanReps}
-            onChange={(n) => onChange({ ...draft, cleanReps: Math.max(0, Math.floor(n)) })}
-            min={0}
-            inputMode="numeric"
-            center
-            inputRef={cleanRef}
-            onEnter={() => dirtyRef.current?.focus()}
-          />
-          <NumberInput
-            label="Dirty reps"
-            value={draft.dirtyReps}
-            onChange={(n) => onChange({ ...draft, dirtyReps: Math.max(0, Math.floor(n)) })}
-            min={0}
-            inputMode="numeric"
-            center
-            inputRef={dirtyRef}
-            onEnter={() => addOnce()}
-          />
-        </div>
-
-        <button
-          type="button"
-          className="w-full px-4 py-3 rounded-2xl bg-black text-white font-semibold active:scale-[0.97] transition-transform"
-          onClick={addOnce}
-        >
-          Add set
-        </button>
-      </div>
+      <button
+        type="button"
+        className="w-full px-4 py-3 rounded-2xl bg-black text-white font-semibold active:scale-[0.97] transition-transform"
+        onClick={addOnce}
+      >
+        Add set
+      </button>
     </div>
   );
 }
@@ -2765,8 +2791,8 @@ function ExerciseSettingsView({
             min={0}
           />
         </Card>
-      ) : eq === "barbell" ? (
-        <Card title="Barbell settings">
+      ) : eq === "barbell" || eq === "ez_bar_plate" ? (
+        <Card title={eq === "barbell" ? "Barbell settings" : "EZ bar settings"}>
           <div className="grid grid-cols-2 gap-3">
             <NumberInput
               label="Bar weight"
