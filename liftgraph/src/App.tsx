@@ -438,31 +438,6 @@ function getWorkingWeightDisplay(
   return { main: `${formatWeight(weight)}` };
 }
 
-function WorkingWeightBar({
-  exercise,
-  weight,
-  barbellPlatesPerSide,
-}: {
-  exercise: ExerciseSettings;
-  weight?: number;
-  barbellPlatesPerSide?: PlateCounts;
-}) {
-  const display = getWorkingWeightDisplay(exercise, weight, barbellPlatesPerSide);
-  return (
-    <div className="sticky top-3">
-      <div className="rounded-2xl border border-gray-200 bg-gray-50 px-2 py-3 text-center">
-        <div className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">
-          Working
-        </div>
-        <div className="text-base font-bold text-gray-900 leading-tight">{display.main}</div>
-        {display.sub ? (
-          <div className="text-[10px] text-gray-500 mt-1">{display.sub}</div>
-        ) : null}
-      </div>
-    </div>
-  );
-}
-
 function setTotalWeight(ex: ExerciseSettings, s: SetEntry): number {
   if (ex.equipment === "barbell" && s.barbellPlatesPerSide) {
     return platesPerSideToTotal(s.barbellPlatesPerSide, ex.barWeight);
