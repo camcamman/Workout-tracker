@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import SplitEditorPage from "./SplitEditor";
 
 /**
  * LiftGraph — phone-first workout tracker prototype
@@ -89,17 +90,23 @@ type WorkoutLibraryItem = {
   exerciseIds: string[];
 };
 
-type SplitWeek = {
-  days: Record<DayName, string | null>; // workoutId or Rest
+type SplitDay = {
+  name: DayName;
+  workoutId: string | null;
+};
+
+type Week = {
+  id: string;
+  name: string;
+  days: SplitDay[];
 };
 
 type Split = {
-  week1: SplitWeek;
-  week2: SplitWeek;
+  weeks: Week[];
 };
 
 type AppSettings = {
-  activeWeek: "week1" | "week2";
+  activeWeekId: string;
   keepScreenAwake?: boolean;
 };
 
@@ -309,44 +316,93 @@ function todayDayName(): DayName {
   return map[idx];
 }
 
-function emptySplitWeek(): SplitWeek {
+function emptyDayRecord(): Record<DayName, string | null> {
   return {
-    days: {
-      Monday: null,
-      Tuesday: null,
-      Wednesday: null,
-      Thursday: null,
-      Friday: null,
-      Saturday: null,
-      Sunday: null,
-    },
+    Monday: null,
+    Tuesday: null,
+    Wednesday: null,
+    Thursday: null,
+    Friday: null,
+    Saturday: null,
+    Sunday: null,
   };
 }
 
-function cloneSplitWeek(w: SplitWeek): SplitWeek {
-  return { days: { ...w.days } };
+function daysFromRecord(record: Record<DayName, string | null>): SplitDay[] {
+  return ALL_DAYS.map((d) => ({ name: d, workoutId: record[d] ?? null }));
+}
+
+function normalizeWeekDays(days: SplitDay[] | undefined): SplitDay[] {
+  const map = new Map<DayName, string | null>();
+  (days || []).forEach((d) => {
+    if (!map.has(d.name)) map.set(d.name, d.workoutId ?? null);
+  });
+  return ALL_DAYS.map((d) => ({ name: d, workoutId: map.get(d) ?? null }));
+}
+
+function createWeek(id: string, name: string, days?: SplitDay[]): Week {
+  return { id, name, days: normalizeWeekDays(days) };
+}
+
+function cloneWeek(week: Week, id: string, name: string): Week {
+  return createWeek(id, name, week.days.map((d) => ({ ...d })));
+}
+
+function getDayWorkoutId(week: Week, day: DayName): string | null {
+  return week.days.find((d) => d.name === day)?.workoutId ?? null;
 }
 
 function ensureV2State(raw: PersistedState): PersistedState {
-  if (raw.workoutLibrary && raw.split && raw.settings) return raw;
+  const workoutLibrary: WorkoutLibraryItem[] =
+    raw.workoutLibrary ||
+    (raw.workouts || []).map((w) => ({
+      id: w.id,
+      name: w.name,
+      exerciseIds: [...w.exerciseIds],
+    }));
 
-  const workoutLibrary: WorkoutLibraryItem[] = (raw.workouts || []).map((w) => ({
-    id: w.id,
-    name: w.name,
-    exerciseIds: [...w.exerciseIds],
-  }));
+  let split: Split | null = null;
 
-  const week1 = emptySplitWeek();
-  for (const w of raw.workouts || []) {
-    if (week1.days[w.day] == null) week1.days[w.day] = w.id;
+  if (raw.split && Array.isArray((raw.split as Split).weeks)) {
+    const weeks = (raw.split as Split).weeks.map((w, idx) =>
+      createWeek(w.id, w.name?.trim() ? w.name : `Week ${idx + 1}`, w.days)
+    );
+    split = { weeks };
+  } else if ((raw.split as any)?.week1 && (raw.split as any)?.week2) {
+    const legacy = raw.split as any;
+    const week1 = createWeek(uid("week"), "Week 1", daysFromRecord(legacy.week1.days));
+    const week2 = createWeek(uid("week"), "Week 2", daysFromRecord(legacy.week2.days));
+    split = { weeks: [week1, week2] };
+  } else {
+    const week1Record = emptyDayRecord();
+    for (const w of raw.workouts || []) {
+      if (week1Record[w.day] == null) week1Record[w.day] = w.id;
+    }
+    const week1 = createWeek(uid("week"), "Week 1", daysFromRecord(week1Record));
+    const week2 = createWeek(uid("week"), "Week 2", daysFromRecord(week1Record));
+    split = { weeks: [week1, week2] };
   }
-  const week2 = cloneSplitWeek(week1);
+
+  if (!split.weeks.length) split.weeks = [createWeek(uid("week"), "Week 1")];
+
+  let activeWeekId = raw.settings?.activeWeekId;
+  const legacyActive = (raw.settings as any)?.activeWeek as "week1" | "week2" | undefined;
+  if (!activeWeekId) {
+    if (legacyActive === "week2" && split.weeks[1]) activeWeekId = split.weeks[1].id;
+    else activeWeekId = split.weeks[0].id;
+  }
+  if (!split.weeks.some((w) => w.id === activeWeekId)) activeWeekId = split.weeks[0].id;
+
+  const settings: AppSettings = {
+    ...(raw.settings || {}),
+    activeWeekId,
+  };
 
   return {
     ...raw,
     workoutLibrary,
-    split: { week1, week2 },
-    settings: { activeWeek: "week1" },
+    split,
+    settings,
   };
 }
 
@@ -631,23 +687,35 @@ type ResolvedWorkout = {
 function resolveWorkoutForDay(
   st: PersistedState,
   day: DayName
-): { workout: ResolvedWorkout | null; workoutId: string | null; activeWeek: "week1" | "week2" } {
-  const activeWeek = st.settings?.activeWeek ?? "week1";
+): {
+  workout: ResolvedWorkout | null;
+  workoutId: string | null;
+  activeWeekId: string;
+  activeWeekName: string;
+} {
+  const weeks = st.split?.weeks || [];
+  const activeWeekId = st.settings?.activeWeekId;
+  const activeWeek = weeks.find((w) => w.id === activeWeekId) || weeks[0] || null;
+  const resolvedActiveWeekId = activeWeek?.id || activeWeekId || "";
+  const activeWeekName = activeWeek?.name?.trim() || "Week 1";
 
-  const v2Id = st.split?.[activeWeek]?.days?.[day] ?? null;
+  const v2Id = activeWeek ? getDayWorkoutId(activeWeek, day) : null;
   if (v2Id) {
     const w = st.workoutLibrary?.find((x) => x.id === v2Id) || null;
-    if (w) return { workout: { ...w }, workoutId: w.id, activeWeek };
-    return { workout: null, workoutId: null, activeWeek };
+    if (w)
+      return { workout: { ...w }, workoutId: w.id, activeWeekId: resolvedActiveWeekId, activeWeekName };
+    return { workout: null, workoutId: null, activeWeekId: resolvedActiveWeekId, activeWeekName };
   }
 
   // Legacy fallback
   const legacy = st.workouts.find((w) => w.day === day) || null;
-  if (!legacy) return { workout: null, workoutId: null, activeWeek };
+  if (!legacy)
+    return { workout: null, workoutId: null, activeWeekId: resolvedActiveWeekId, activeWeekName };
   return {
     workout: { id: legacy.id, name: legacy.name, exerciseIds: legacy.exerciseIds },
     workoutId: legacy.id,
-    activeWeek,
+    activeWeekId: resolvedActiveWeekId,
+    activeWeekName,
   };
 }
 
@@ -1287,7 +1355,8 @@ export default function App() {
   const resolvedToday = useMemo(() => resolveWorkoutForDay(state, today), [state, today]);
   const todaysWorkout = resolvedToday.workout;
   const todaysWorkoutId = resolvedToday.workoutId;
-  const activeWeek = resolvedToday.activeWeek;
+  const activeWeekId = resolvedToday.activeWeekId;
+  const activeWeekName = resolvedToday.activeWeekName;
 
   const activeSession = useMemo(() => {
     if (screen.name !== "session") return null;
@@ -1401,25 +1470,148 @@ export default function App() {
     return ex;
   };
 
-  const updateSplitDay = (week: "week1" | "week2", day: DayName, workoutId: string | null) => {
+  const updateSplitDay = (weekId: string, day: DayName, workoutId: string | null) => {
     setState((st) => {
       const v2 = ensureV2State(st);
+      const weeks = (v2.split?.weeks || []).map((w) =>
+        w.id === weekId
+          ? { ...w, days: w.days.map((d) => (d.name === day ? { ...d, workoutId } : d)) }
+          : w
+      );
       return {
         ...v2,
-        split: {
-          ...v2.split!,
-          [week]: {
-            days: { ...v2.split![week].days, [day]: workoutId },
-          },
-        },
+        split: { weeks },
       };
     });
   };
 
-  const setActiveWeek = (w: "week1" | "week2") => {
+  const addWeek = () => {
+    const newWeekId = uid("week");
     setState((st) => {
       const v2 = ensureV2State(st);
-      return { ...v2, settings: { ...v2.settings!, activeWeek: w } };
+      const weeks = v2.split?.weeks || [];
+      const last = weeks[weeks.length - 1];
+      const name = `Week ${weeks.length + 1}`;
+      const nextWeek = last ? cloneWeek(last, newWeekId, name) : createWeek(newWeekId, name);
+      return { ...v2, split: { weeks: [...weeks, nextWeek] } };
+    });
+    return newWeekId;
+  };
+
+  const renameWeek = (weekId: string, name: string) => {
+    setState((st) => {
+      const v2 = ensureV2State(st);
+      const weeks = (v2.split?.weeks || []).map((w) =>
+        w.id === weekId ? { ...w, name } : w
+      );
+      return { ...v2, split: { weeks } };
+    });
+  };
+
+  const deleteWeek = (weekId: string) => {
+    if ((state.split?.weeks?.length || 0) <= 1) return;
+    requestConfirm({
+      title: "Delete week",
+      message: "Delete this week from your split? This does not affect workout history.",
+      confirmText: "Delete",
+      cancelText: "Cancel",
+      danger: true,
+      onConfirm: () => {
+        setState((st) => {
+          const v2 = ensureV2State(st);
+          const weeks = (v2.split?.weeks || []).filter((w) => w.id !== weekId);
+          const nextWeeks = weeks.length ? weeks : [createWeek(uid("week"), "Week 1")];
+          const activeWeekId = v2.settings?.activeWeekId;
+          const nextActiveWeekId =
+            activeWeekId && nextWeeks.some((w) => w.id === activeWeekId)
+              ? activeWeekId
+              : nextWeeks[0].id;
+          return {
+            ...v2,
+            split: { weeks: nextWeeks },
+            settings: { ...(v2.settings || {}), activeWeekId: nextActiveWeekId },
+          };
+        });
+      },
+    });
+  };
+
+  const reorderWorkoutExercise = (workoutId: string, fromIndex: number, toIndex: number) => {
+    setState((st) => {
+      const v2 = ensureV2State(st);
+      const nextLibrary = (v2.workoutLibrary || []).map((w) => {
+        if (w.id !== workoutId) return w;
+        const ids = [...w.exerciseIds];
+        if (
+          fromIndex < 0 ||
+          toIndex < 0 ||
+          fromIndex >= ids.length ||
+          toIndex >= ids.length
+        )
+          return w;
+        const [moved] = ids.splice(fromIndex, 1);
+        ids.splice(toIndex, 0, moved);
+        return { ...w, exerciseIds: ids };
+      });
+      return { ...v2, workoutLibrary: nextLibrary };
+    });
+  };
+
+  const addExerciseToWorkout = (workoutId: string, exerciseId: string) => {
+    setState((st) => {
+      const v2 = ensureV2State(st);
+      const nextLibrary = (v2.workoutLibrary || []).map((w) => {
+        if (w.id !== workoutId) return w;
+        if (w.exerciseIds.includes(exerciseId)) return w;
+        return { ...w, exerciseIds: [...w.exerciseIds, exerciseId] };
+      });
+      return { ...v2, workoutLibrary: nextLibrary };
+    });
+  };
+
+  const removeExerciseFromWorkout = (workoutId: string, exerciseId: string) => {
+    setState((st) => {
+      const v2 = ensureV2State(st);
+      const nextLibrary = (v2.workoutLibrary || []).map((w) => {
+        if (w.id !== workoutId) return w;
+        return { ...w, exerciseIds: w.exerciseIds.filter((id) => id !== exerciseId) };
+      });
+      return { ...v2, workoutLibrary: nextLibrary };
+    });
+  };
+
+  const requestImportSplit = (weeks: Week[]) => {
+    requestConfirm({
+      title: "Import split",
+      message: "This will replace your current split. Continue?",
+      confirmText: "Import",
+      cancelText: "Cancel",
+      danger: true,
+      onConfirm: () => {
+        setState((st) => {
+          const v2 = ensureV2State(st);
+          const normalizedWeeks = weeks.map((w, idx) =>
+            createWeek(w.id, w.name?.trim() ? w.name : `Week ${idx + 1}`, w.days)
+          );
+          const nextActive =
+            v2.settings?.activeWeekId &&
+            normalizedWeeks.some((w) => w.id === v2.settings?.activeWeekId)
+              ? v2.settings?.activeWeekId
+              : normalizedWeeks[0].id;
+          return {
+            ...v2,
+            split: { weeks: normalizedWeeks },
+            settings: { ...(v2.settings || {}), activeWeekId: nextActive },
+          };
+        });
+      },
+    });
+  };
+
+  const setActiveWeek = (weekId: string) => {
+    setState((st) => {
+      const v2 = ensureV2State(st);
+      return { ...v2, settings: { ...v2.settings!, activeWeekId: weekId } };
     });
   };
 
@@ -1468,11 +1660,9 @@ export default function App() {
   const updateKeepAwake = (v: boolean) => {
     setState((st) => {
       const v2 = ensureV2State(st);
-      return { ...v2, settings: { ...(v2.settings || { activeWeek: "week1" }), keepScreenAwake: v } };
+      return { ...v2, settings: { ...(v2.settings || {}), keepScreenAwake: v } };
     });
   };
-
-  const settingsWeek = state.settings?.activeWeek ?? "week1";
 
   return (
     <div className="min-h-screen bg-gray-50 text-gray-900 selection:bg-black selection:text-white overscroll-none">
@@ -1488,7 +1678,7 @@ export default function App() {
               </div>
               <div className="flex gap-2">
                 <Pill>{today}</Pill>
-                <Pill>{activeWeek === "week1" ? "Week 1" : "Week 2"}</Pill>
+                <Pill>{activeWeekName}</Pill>
               </div>
             </div>
           </div>
@@ -1538,7 +1728,7 @@ export default function App() {
                   ) : (
                     <Card title={todaysWorkout.name}>
                       <div className="flex items-center justify-between">
-                        <div className="text-sm text-gray-600">Week: {activeWeek === "week1" ? "Week 1" : "Week 2"}</div>
+                        <div className="text-sm text-gray-600">Week: {activeWeekName}</div>
                         <button
                           className="px-4 py-3 rounded-2xl bg-black text-white text-sm font-semibold active:scale-[0.97] transition-transform duration-100"
                           onClick={() => todaysWorkoutId && openSession(todaysWorkoutId)}
@@ -1582,39 +1772,18 @@ export default function App() {
 
           {tab === "Split" && (
             <div className="space-y-4">
-              <Card
-                title="Weekly Split"
-                right={
-                  <div className="flex gap-2">
-                    <button
-                      type="button"
-                      className={
-                        "px-3 py-2 rounded-xl text-sm font-semibold " +
-                        (settingsWeek === "week1" ? "bg-black text-white" : "bg-gray-100")
-                      }
-                      onClick={() => setActiveWeek("week1")}
-                    >
-                      Week 1
-                    </button>
-                    <button
-                      type="button"
-                      className={
-                        "px-3 py-2 rounded-xl text-sm font-semibold " +
-                        (settingsWeek === "week2" ? "bg-black text-white" : "bg-gray-100")
-                      }
-                      onClick={() => setActiveWeek("week2")}
-                    >
-                      Week 2
-                    </button>
-                  </div>
-                }
-              >
-                <SplitEditor
-                  state={state}
-                  week={settingsWeek}
-                  onSetDay={(day, workoutId) => updateSplitDay(settingsWeek, day, workoutId)}
-                />
-              </Card>
+              <SplitEditorPage
+                state={state}
+                exercisesById={exercisesById}
+                onSetDay={updateSplitDay}
+                onAddWeek={addWeek}
+                onDeleteWeek={deleteWeek}
+                onRenameWeek={renameWeek}
+                onReorderWorkoutExercise={reorderWorkoutExercise}
+                onAddExerciseToWorkout={addExerciseToWorkout}
+                onRemoveExerciseFromWorkout={removeExerciseFromWorkout}
+                onRequestImportSplit={requestImportSplit}
+              />
 
               <Card title="Workout Library">
                 <WorkoutLibrary
@@ -1644,15 +1813,13 @@ export default function App() {
                         setState((st) => {
                           const v2 = ensureV2State(st);
                           const nextLib = (v2.workoutLibrary || []).filter((w) => w.id !== workoutId);
-                          const nextSplit: Split = {
-                            week1: { days: { ...v2.split!.week1.days } },
-                            week2: { days: { ...v2.split!.week2.days } },
-                          };
-                          for (const d of ALL_DAYS) {
-                            if (nextSplit.week1.days[d] === workoutId) nextSplit.week1.days[d] = null;
-                            if (nextSplit.week2.days[d] === workoutId) nextSplit.week2.days[d] = null;
-                          }
-                          return { ...v2, workoutLibrary: nextLib, split: nextSplit };
+                          const nextWeeks = (v2.split?.weeks || []).map((week) => ({
+                            ...week,
+                            days: week.days.map((d) =>
+                              d.workoutId === workoutId ? { ...d, workoutId: null } : d
+                            ),
+                          }));
+                          return { ...v2, workoutLibrary: nextLib, split: { weeks: nextWeeks } };
                         });
                       },
                     });
@@ -1746,28 +1913,15 @@ export default function App() {
                   </Card>
 
                   <Card title="Active Week">
-                    <div className="flex gap-2">
-                      <button
-                        type="button"
-                        className={
-                          "px-3 py-2 rounded-xl text-sm font-semibold " +
-                          (settingsWeek === "week1" ? "bg-black text-white" : "bg-gray-100")
-                        }
-                        onClick={() => setActiveWeek("week1")}
-                      >
-                        Week 1
-                      </button>
-                      <button
-                        type="button"
-                        className={
-                          "px-3 py-2 rounded-xl text-sm font-semibold " +
-                          (settingsWeek === "week2" ? "bg-black text-white" : "bg-gray-100")
-                        }
-                        onClick={() => setActiveWeek("week2")}
-                      >
-                        Week 2
-                      </button>
-                    </div>
+                    <Select
+                      label=""
+                      value={activeWeekId}
+                      onChange={(v) => setActiveWeek(v)}
+                      options={(state.split?.weeks || []).map((w) => ({
+                        value: w.id,
+                        label: w.name,
+                      }))}
+                    />
                   </Card>
 
                   <Card title="Exercise Settings">
@@ -1806,48 +1960,6 @@ export default function App() {
       </div>
 
       <BottomNav tab={tab} setTab={setTab} />
-    </div>
-  );
-}
-
-// ------------------------- Split Editor -------------------------
-
-function SplitEditor({
-  state,
-  week,
-  onSetDay,
-}: {
-  state: PersistedState;
-  week: "week1" | "week2";
-  onSetDay: (day: DayName, workoutId: string | null) => void;
-}) {
-  const lib = state.workoutLibrary || [];
-  const split = state.split?.[week] || emptySplitWeek();
-
-  const options = useMemo(() => {
-    const base = [{ value: "", label: "Rest" }];
-    const ws = lib.map((w) => ({ value: w.id, label: w.name }));
-    return base.concat(ws);
-  }, [lib]);
-
-  return (
-    <div className="space-y-3">
-      {ALL_DAYS.map((d) => (
-        <div key={d} className="flex items-center justify-between gap-3">
-          <div className="w-28 font-semibold">{d}</div>
-          <div className="flex-1">
-            <Select
-              label=""
-              value={split.days[d] || ""}
-              onChange={(v) => onSetDay(d, v ? v : null)}
-              options={options}
-            />
-          </div>
-        </div>
-      ))}
-      <div className="text-xs text-gray-600">
-        By default, Week 2 starts as a copy of Week 1 and stays independent once edited.
-      </div>
     </div>
   );
 }
@@ -3008,23 +3120,32 @@ function runTestsOnce() {
   const migrated = ensureV2State(legacy);
   assert(!!migrated.workoutLibrary, "Migration should create workoutLibrary");
   assert(!!migrated.split && !!migrated.settings, "Migration should create split + settings");
-  assert(migrated.settings!.activeWeek === "week1", "activeWeek should default to week1");
-
-  assert(migrated.split!.week1.days.Monday === "w_mon", "Week1 Monday should map to Monday workout");
   assert(
-    migrated.split!.week1.days.Wednesday === "w_wed_a",
+    migrated.settings!.activeWeekId === migrated.split!.weeks[0].id,
+    "activeWeekId should default to first week"
+  );
+
+  const migratedWeek1 = migrated.split!.weeks[0];
+  const migratedWeek2 = migrated.split!.weeks[1];
+  assert(
+    getDayWorkoutId(migratedWeek1, "Monday") === "w_mon",
+    "Week1 Monday should map to Monday workout"
+  );
+  assert(
+    getDayWorkoutId(migratedWeek1, "Wednesday") === "w_wed_a",
     "If duplicates exist, first encountered should be scheduled"
   );
 
   assert(
-    JSON.stringify(migrated.split!.week2.days) === JSON.stringify(migrated.split!.week1.days),
+    JSON.stringify(migratedWeek2.days) === JSON.stringify(migratedWeek1.days),
     "Week2 should initially equal Week1"
   );
 
-  const wk1Before = migrated.split!.week1.days.Monday;
-  migrated.split!.week2.days.Monday = null;
+  const wk1Before = getDayWorkoutId(migratedWeek1, "Monday");
+  const wk2Monday = migratedWeek2.days.find((d) => d.name === "Monday");
+  if (wk2Monday) wk2Monday.workoutId = null;
   assert(
-    migrated.split!.week1.days.Monday === wk1Before,
+    getDayWorkoutId(migratedWeek1, "Monday") === wk1Before,
     "Week2 edits should not mutate Week1 (deep copy)"
   );
 
@@ -3042,15 +3163,17 @@ function runTestsOnce() {
       { id: "w_tue", name: "Tue", exerciseIds: ["t_db"] },
     ],
     split: {
-      week1: { days: { ...emptySplitWeek().days, Monday: "w_mon", Tuesday: null } },
-      week2: { days: { ...emptySplitWeek().days, Monday: "w_tue", Tuesday: null } },
+      weeks: [
+        createWeek("w1", "Week 1", daysFromRecord({ ...emptyDayRecord(), Monday: "w_mon" })),
+        createWeek("w2", "Week 2", daysFromRecord({ ...emptyDayRecord(), Monday: "w_tue" })),
+      ],
     },
-    settings: { activeWeek: "week2" },
+    settings: { activeWeekId: "w2" },
     sessions: [],
   };
 
   const rMon = resolveWorkoutForDay(st2, "Monday");
-  assert(rMon.workoutId === "w_tue", "resolveWorkoutForDay should respect activeWeek=week2");
+  assert(rMon.workoutId === "w_tue", "resolveWorkoutForDay should respect activeWeekId");
   assert(rMon.workout?.name === "Tue", "resolveWorkoutForDay should resolve from workoutLibrary");
 
   _test_getPWADisplayMode();
