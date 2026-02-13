@@ -1660,7 +1660,13 @@ export default function App() {
   const updateKeepAwake = (v: boolean) => {
     setState((st) => {
       const v2 = ensureV2State(st);
-      return { ...v2, settings: { ...(v2.settings || {}), keepScreenAwake: v } };
+      const fallbackWeekId = v2.split?.weeks?.[0]?.id || uid("week");
+      const activeWeekId = v2.settings?.activeWeekId || fallbackWeekId;
+      const weeks =
+        v2.split?.weeks && v2.split.weeks.length
+          ? v2.split.weeks
+          : [createWeek(fallbackWeekId, "Week 1")];
+      return { ...v2, split: { weeks }, settings: { activeWeekId, keepScreenAwake: v } };
     });
   };
 
