@@ -558,22 +558,24 @@ export default function SplitEditorPage({
 
                               {workout ? (
                                 <div className="mt-3 space-y-2">
-                                  <div className="flex items-center gap-2">
-                                    <select
-                                      value={addExerciseId}
-                                      onChange={(e) => setAddExerciseId(e.target.value)}
-                                      className="flex-1 h-11 px-3 py-2 rounded-xl border border-gray-200 focus:outline-none focus:ring-2 focus:ring-black"
-                                    >
-                                      <option value="">Add exercise…</option>
-                                      {availableExercises.map((ex) => (
-                                        <option key={ex.id} value={ex.id}>
-                                          {ex.name}
-                                        </option>
-                                      ))}
-                                    </select>
+                                  <div className="flex w-full items-center gap-2">
+                                    <div className="min-w-0 flex-1">
+                                      <select
+                                        value={addExerciseId}
+                                        onChange={(e) => setAddExerciseId(e.target.value)}
+                                        className="h-11 w-full min-w-0 px-3 py-2 rounded-xl border border-gray-200 focus:outline-none focus:ring-2 focus:ring-black"
+                                      >
+                                        <option value="">Add exercise…</option>
+                                        {availableExercises.map((ex) => (
+                                          <option key={ex.id} value={ex.id}>
+                                            {ex.name}
+                                          </option>
+                                        ))}
+                                      </select>
+                                    </div>
                                     <button
                                       type="button"
-                                      className="h-11 px-4 rounded-xl bg-black text-white text-sm font-semibold"
+                                      className="h-11 shrink-0 px-4 rounded-xl bg-black text-white text-sm font-semibold"
                                       onClick={() => {
                                         if (!addExerciseId) return;
                                         onAddExerciseToWorkout(workout.id, addExerciseId);

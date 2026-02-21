@@ -1008,12 +1008,14 @@ function StepperInput({
   onChange,
   step,
   min = 0,
+  segmented = false,
 }: {
   label: string;
   value: number;
   onChange: (n: number) => void;
   step: number;
   min?: number;
+  segmented?: boolean;
 }) {
   const [text, setText] = useState<string>(String(value));
 
@@ -1027,54 +1029,107 @@ function StepperInput({
   return (
     <label className="flex flex-col gap-1 w-full">
       <span className="text-xs font-semibold text-gray-600">{label}</span>
-      <div className="flex items-stretch gap-3 w-full">
-        <button
-          type="button"
-          onClick={dec}
-          className="w-16 h-14 rounded-2xl bg-gray-100 font-black text-3xl flex items-center justify-center"
-          aria-label={`decrease ${label}`}
-        >
-          −
-        </button>
-        <input
-          type="text"
-          inputMode="decimal"
-          value={text}
-          onChange={(e) => {
-            const raw = e.target.value;
-            setText(raw);
-            const trimmed = raw.trim();
-            if (trimmed === "") return;
-            const n = Number(trimmed);
-            if (!Number.isFinite(n)) return;
-            onChange(Math.max(min, n));
-          }}
-          onBlur={() => {
-            if (text.trim() === "") {
-              setText(String(value));
-              return;
-            }
-            const n = Number(text);
-            if (!Number.isFinite(n)) {
-              setText(String(value));
-              return;
-            }
-            const clamped = Math.max(min, n);
-            onChange(clamped);
-            setText(String(clamped));
-          }}
-          className="flex-1 px-3 py-2 rounded-2xl border border-gray-200 focus:outline-none focus:ring-2 focus:ring-black text-center text-xl font-bold"
-          aria-label={label}
-        />
-        <button
-          type="button"
-          onClick={inc}
-          className="w-16 h-14 rounded-2xl bg-black text-white font-black text-3xl flex items-center justify-center"
-          aria-label={`increase ${label}`}
-        >
-          +
-        </button>
-      </div>
+      {segmented ? (
+        <div className="w-full min-w-0">
+          <div className="flex items-center h-12 w-full rounded-2xl bg-gray-100 overflow-hidden">
+            <button
+              type="button"
+              onClick={dec}
+              className="w-14 h-full shrink-0 text-xl font-semibold flex items-center justify-center active:scale-95 transition-transform duration-100"
+              aria-label={`decrease ${label}`}
+            >
+              −
+            </button>
+            <input
+              type="text"
+              inputMode="decimal"
+              value={text}
+              onChange={(e) => {
+                const raw = e.target.value;
+                setText(raw);
+                const trimmed = raw.trim();
+                if (trimmed === "") return;
+                const n = Number(trimmed);
+                if (!Number.isFinite(n)) return;
+                onChange(Math.max(min, n));
+              }}
+              onBlur={() => {
+                if (text.trim() === "") {
+                  setText(String(value));
+                  return;
+                }
+                const n = Number(text);
+                if (!Number.isFinite(n)) {
+                  setText(String(value));
+                  return;
+                }
+                const clamped = Math.max(min, n);
+                onChange(clamped);
+                setText(String(clamped));
+              }}
+              className="flex-1 min-w-0 h-full px-2 text-center bg-transparent outline-none text-lg font-semibold border-x border-gray-200/70 focus:ring-0"
+              aria-label={label}
+            />
+            <button
+              type="button"
+              onClick={inc}
+              className="w-14 h-full shrink-0 text-xl font-semibold flex items-center justify-center active:scale-95 transition-transform duration-100"
+              aria-label={`increase ${label}`}
+            >
+              +
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="flex items-stretch gap-3 w-full">
+          <button
+            type="button"
+            onClick={dec}
+            className="w-16 h-14 rounded-2xl bg-gray-100 font-black text-3xl flex items-center justify-center"
+            aria-label={`decrease ${label}`}
+          >
+            −
+          </button>
+          <input
+            type="text"
+            inputMode="decimal"
+            value={text}
+            onChange={(e) => {
+              const raw = e.target.value;
+              setText(raw);
+              const trimmed = raw.trim();
+              if (trimmed === "") return;
+              const n = Number(trimmed);
+              if (!Number.isFinite(n)) return;
+              onChange(Math.max(min, n));
+            }}
+            onBlur={() => {
+              if (text.trim() === "") {
+                setText(String(value));
+                return;
+              }
+              const n = Number(text);
+              if (!Number.isFinite(n)) {
+                setText(String(value));
+                return;
+              }
+              const clamped = Math.max(min, n);
+              onChange(clamped);
+              setText(String(clamped));
+            }}
+            className="flex-1 px-3 py-2 rounded-2xl border border-gray-200 focus:outline-none focus:ring-2 focus:ring-black text-center text-xl font-bold"
+            aria-label={label}
+          />
+          <button
+            type="button"
+            onClick={inc}
+            className="w-16 h-14 rounded-2xl bg-black text-white font-black text-3xl flex items-center justify-center"
+            aria-label={`increase ${label}`}
+          >
+            +
+          </button>
+        </div>
+      )}
       <div className="text-[11px] text-gray-500">Step: {step}</div>
     </label>
   );
@@ -2468,7 +2523,9 @@ function SessionView({
                         : "="}
                     </Pill>
                   ) : null}
-                  <div className="text-lg font-black leading-none">{expanded ? "−" : "+"}</div>
+                  <div className="w-11 h-11 shrink-0 rounded-full bg-gray-100 flex items-center justify-center text-2xl font-bold leading-none active:scale-95 transition-transform duration-100">
+                    {expanded ? "−" : "+"}
+                  </div>
                 </div>
               </button>
 
@@ -2702,6 +2759,7 @@ function AddSetForm({
           onChange={(n) => onChange({ ...draft, weight: n })}
           step={exercise.dbIncrementPerHand}
           min={0}
+          segmented
         />
       ) : exercise.equipment === "ez_bar_plate" || exercise.equipment === "ez_bar" ? (
         <StepperInput
@@ -2710,6 +2768,7 @@ function AddSetForm({
           onChange={(n) => onChange({ ...draft, weight: n })}
           step={exercise.barbellIncrementPerSide * 2}
           min={0}
+          segmented
         />
       ) : exercise.equipment === "ez_bar_fixed" ? (
         <StepperInput
@@ -2718,6 +2777,7 @@ function AddSetForm({
           onChange={(n) => onChange({ ...draft, weight: n })}
           step={exercise.otherIncrementTotal}
           min={0}
+          segmented
         />
       ) : exercise.equipment === "bodyweight" ? (
         <NumberInput
@@ -2734,6 +2794,7 @@ function AddSetForm({
           onChange={(n) => onChange({ ...draft, weight: n })}
           step={exercise.otherIncrementTotal}
           min={0}
+          segmented
         />
       )}
 
